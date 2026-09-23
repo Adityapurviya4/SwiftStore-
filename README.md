@@ -392,3 +392,135 @@ async def verify_payment(payload: VerificationSchema):
 -
 -
 
+Welcome to the **SwiftStore System Design Canvas**. This layout acts as your digital whiteboard, breaking down the application into independent architectural zones spanning from the client interface down to the relational data layer.
+
+---
+
+## 🏛️ Zone 1: System Architecture Map
+
+This flow represents the decoupled client-server architecture, illustrating how the React frontend coordinates with external gateways before communicating with the Python backend.
+
+```text
+ ┌────────────────────────────────────────────────────────┐
+ │                 CLIENT LAYER (React.js)                │
+ │  Handles UI, Local/Guest Cart State, Firebase SDK      │
+ └──────┬───────────────────────────────┬─────────────────┘
+        │ 1. Request OTP                │ 3. API Calls (Bearer JWT)
+        ▼                               ▼
+ ┌──────────────┐               ┌─────────────────────────────────┐
+ │   EXTERNAL   │ 2. Return JWT │   BACKEND LAYER (FastAPI)       │
+ │   SERVICES   ├──────────────►│ ├─ Auth Middleware (Deps.py)    │
+ │ (Firebase)   │               │ ├─ Pincode/Serviceability Engine│
+ └──────────────┘               │ ├─ Cart Sync Manager            │
+                                │ └─ Payment/Checkout Handler     │
+                                └───────┬──────────────────┬──────┘
+ ┌──────────────┐ 4. Create Order       │ 6. DB Read/Write │ 5. Render
+ │   EXTERNAL   │◄──────────────────────┤                  │    PDF
+ │   SERVICES   │ 4b. Async Webhook     │                  ▼
+ │ (Razorpay)   ├───────────────────────┤           ┌──────────────┐
+ └──────────────┘                       ▼           │  FILE STORE  │
+                             ┌────────────────────┐ │ (In-Memory/  │
+                             │  DATABASE LAYER    │ │  AWS S3)     │
+                             │   (PostgreSQL)     │ └──────────────┘
+                             └────────────────────┘
+
+```
+
+---
+
+## 🛠️ Zone 2: Tech Stack Matrix
+
+| Layer | Technology | Primary Responsibility |
+| --- | --- | --- |
+| **Frontend** | React.js | UI rendering, state management, Razorpay checkout modal. |
+| **Backend API** | Python (FastAPI) | High-performance async endpoints, business logic, webhooks. |
+| **Authentication** | Firebase Auth | Phone SMS routing, OTP verification, JWT generation. |
+| **Database** | PostgreSQL | Relational storage, ACID compliance for cart and orders. |
+| **Payments** | Razorpay SDK | UPI, Cards, NetBanking processing, and webhook callbacks. |
+| **Document Gen** | ReportLab / WeasyPrint | Compiling HTML data into downloadable tax invoice PDFs. |
+
+---
+
+## 🔐 Zone 3: Authentication & Provisioning Flow
+
+The authentication system strictly separates identity verification (handled by Firebase) from authorization and data storage (handled by FastAPI/PostgreSQL).
+
+1. **Client OTP Request:** React.js + Firebase SDK.
+The user enters a 10-digit mobile number. The client calls `signInWithPhoneNumber(auth, phone)`. Firebase routes an SMS OTP to the user.
+
+
+2. **Token Generation:** Firebase Authenticator.
+The user inputs the 6-digit OTP. Firebase validates the payload and issues a secure, short-lived JSON Web Token (`idToken`) containing the user's UID.
+
+
+3. **Backend Verification:** FastAPI Dependency Injection.
+React passes the JWT in the `Authorization: Bearer` header to the backend. FastAPI intercepts this and uses `firebase_admin.auth.verify_id_token()` to cryptographically verify the signature.
+
+
+4. **Database Provisioning:** PostgreSQL Upsert.
+FastAPI extracts the UID and phone number. It queries the database: if the user exists, it updates `last_login`; if new, it inserts a new record into the `users` table and initializes their session.
+
+
+---
+
+## 🛒 Zone 4: Checkout & Payment State Machine
+
+Managing the cart state and finalizing a payment requires multi-stage validation to prevent phantom inventory or unserviceable deliveries.
+
+1. **Cart Synchronization:** Database-First Approach.
+On login, the frontend dispatches `POST /api/cart/sync` with guest cart items. FastAPI uses an `ON CONFLICT` query to merge local items with the persistent PostgreSQL cart without duplicating rows.
+
+
+2. **Serviceability Validation:** Pincode Lookup.
+Before checkout, the frontend queries `/api/pincode/check/{pincode}`. The database checks the `serviceable_pincodes` table and returns boolean flags for COD availability and estimated delivery days.
+
+
+3. **Order Initialization:** Razorpay Pre-flight.
+If the user selects a prepaid method, FastAPI calls the Razorpay API to generate a `razorpay_order_id`, ensuring the backend maintains a source of truth for the transaction amount.
+
+
+4. **Dual-Guard Verification:** Synchronous + Webhook.
+Upon payment completion, the client sends the `razorpay_payment_id` and `razorpay_signature` to the backend. FastAPI generates an HMAC-SHA256 hash using the secret key to verify authenticity. An async webhook provides a fallback if the user closes their browser early.
+
+
+5. **Invoice Generation:** Automated PDF Engine.
+Once the order transitions to `PAID`, a Python library renders an HTML template into a PDF invoice, stores it in memory (or an S3 bucket), and sends a pre-signed download link to the client.
+
+
+---
+
+## 🗄️ Zone 5: Database Entity-Relationship (ER) Canvas
+
+The system utilizes a **Product-Variant** architecture, allowing a single parent product to house multiple SKUs for size and color.
+
+> **Key insight:** The `cart_items` table features a `UNIQUE(user_id, variant_id)` constraint to ensure users only increment quantities rather than creating duplicate cart rows.
+
+| Table Name | Primary Key (PK) | Foreign Keys (FK) & Core Fields | Purpose |
+| --- | --- | --- | --- |
+| **users** | `id` (UUID) | `firebase_uid`, `phone_number` | Stores authorized user profiles. |
+| **categories** | `id` (INT) | `parent_id` (Self-referencing) | Supports hierarchical nesting (e.g., Men -> Shirts). |
+| **products** | `id` (UUID) | `category_id` (categories) | Base product details (title, description, base_price). |
+| **product_variants** | `id` (UUID) | `product_id` (products) | Specific SKUs (size, color, stock_quantity, images). |
+| **addresses** | `id` (UUID) | `user_id` (users) | Saves delivery locations (Home/Work) and pincodes. |
+| **serviceable_pincodes** | `pincode` (VARCHAR) | None | Logistics lookup for COD toggles and delivery estimates. |
+| **cart_items** | `id` (UUID) | `user_id`, `variant_id` | Persists user cart sessions across multiple devices. |
+| **orders** | `id` (UUID) | `user_id`, `address_id` | Tracks financials, statuses, and Razorpay IDs. |
+| **order_items** | `id` (UUID) | `order_id`, `variant_id` | Locks in the specific variant and purchase price at checkout. |
+
+---
+
+## 🌐 Zone 6: API Gateway Contracts
+
+The internal API structure handles routing between the stateless frontend and the database layer.
+
+| Endpoint | Method | Auth | Role in Ecosystem |
+| --- | --- | --- | --- |
+| `/api/auth/sync` | POST | 🛡️ Bearer | Provisions the Firebase user inside the PostgreSQL database. |
+| `/api/products` | GET | 🌍 Public | Returns the catalog with offset pagination and search filtering. |
+| `/api/products/{id}` | GET | 🌍 Public | Expands a product ID to show all attached variant SKUs. |
+| `/api/cart` | GET | 🛡️ Bearer | Fetches the synchronized cross-device shopping cart. |
+| `/api/pincode/{code}` | GET | 🌍 Public | Logistics check; actively disables COD on frontend if unserviceable. |
+| `/api/orders/create` | POST | 🛡️ Bearer | Initializes either a standard COD order or a Razorpay staging order. |
+| `/api/orders/verify` | POST | 🛡️ Bearer | Authenticates the Razorpay HMAC signature to transition order to PAID. |
+| `/api/webhooks/razorpay` | POST | 🔐 Secret | Backend-to-backend endpoint for asynchronous payment confirmations. |
+| `/api/orders/{id}/invoice` | GET | 🛡️ Bearer | Streams the dynamically generated PDF tax document to the browser. |
