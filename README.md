@@ -373,3 +373,22 @@ async def verify_payment(payload: VerificationSchema):
 | `/api/orders/create` | `POST` | `Bearer <Firebase_JWT>` | Initializes Razorpay order or creates COD order |
 | `/api/orders/verify` | `POST` | `Bearer <Firebase_JWT>` | Verifies Razorpay HMAC signature |
 | `/api/orders/{id}/invoice` | `GET` | `Bearer <Firebase_JWT>` | Returns downloadable PDF stream for tax invoice |
+
+
+-
+-
+-
+-
+-
+-
+-
+
+-
+-
+-
+-
+-
+--
+-
+-
+
